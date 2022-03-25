@@ -1,0 +1,360 @@
+From efaabfe680ff2882701d0be86357c8669142cfc5 Mon Sep 17 00:00:00 2001
+From: Julius Tio <15597932+juliusarden@users.noreply.github.com>
+Date: Fri, 14 Jan 2022 05:07:26 +1100
+Subject: [Search solution]
+
+Create NativeModule UniversityFinderNative and expose search function to react native
+---
+ App.js                                        | 32 +++----
+ .../com/universitylist/DatabaseManager.java   | 52 +++++++++++
+ .../com/universitylist/MainApplication.java   |  1 +
+ .../UniversityFinderNative.java               | 79 +++++++++++++++++
+ .../UniversityFinderPackage.java              | 24 +++++
+ .../main/java/com/universitylist/Utils.java   | 88 +++++++++++++++++++
+ 6 files changed, 256 insertions(+), 20 deletions(-)
+ create mode 100644 android/app/src/main/java/com/universitylist/DatabaseManager.java
+ create mode 100644 android/app/src/main/java/com/universitylist/UniversityFinderNative.java
+ create mode 100644 android/app/src/main/java/com/universitylist/UniversityFinderPackage.java
+ create mode 100644 android/app/src/main/java/com/universitylist/Utils.java
+
+diff --git a/App.js b/App.js
+index 39324bb..f4c6d85 100644
+--- a/App.js
++++ b/App.js
+@@ -19,6 +19,8 @@ import {
+   SafeAreaView,
+ } from 'react-native';
+
++let UniversityFinderNative = NativeModules.UniversityFinderNative;
++
+ class Search extends React.Component {
+   constructor() {
+     super();
+@@ -26,32 +28,22 @@ class Search extends React.Component {
+     this.state = {
+       descriptionText: null,
+       locationText: '',
+-      universities: [
+-        // Dummy data for now
+-        {
+-          country: 'United States',
+-          web_page: 'http://www.harvard.edu/',
+-          domain: 'harvard.edu',
+-          name: 'Harvard University',
+-          alpha_two_code: 'US',
+-          estYear: '1984',
+-        },
+-        {
+-          country: 'United States',
+-          web_page: 'http://web.mit.edu/',
+-          domain: 'mit.edu',
+-          name: 'Massachusetts Institute of Technology',
+-          alpha_two_code: 'US',
+-          estYear: '1986',
+-        },
+-      ],
++      universities: [],
+     };
+
+     this.onChangeText('');
+   }
+
+   onChangeText(text) {
+-    // Search logic here
++    UniversityFinderNative.search(
++      text,
++      err => {
++        console.log(err);
++      },
++      universities => {
++        this.setState({ universities });
++      },
++    );
+   }
+
+   render() {
+diff --git a/android/app/src/main/java/com/universitylist/DatabaseManager.java b/android/app/src/main/java/com/universitylist/DatabaseManager.java
+new file mode 100644
+index 0000000..37f9b26
+--- /dev/null
++++ b/android/app/src/main/java/com/universitylist/DatabaseManager.java
+@@ -0,0 +1,52 @@
++package com.universitylist;
++
++import android.content.Context;
++
++import com.couchbase.lite.CouchbaseLite;
++import com.couchbase.lite.CouchbaseLiteException;
++import com.couchbase.lite.Database;
++import com.couchbase.lite.DatabaseConfiguration;
++import com.couchbase.lite.FullTextIndex;
++import com.couchbase.lite.FullTextIndexItem;
++import com.couchbase.lite.IndexBuilder;
++
++public class DatabaseManager {
++
++	private static String DB_NAME = "mobile";
++
++	private static Database database;
++	private static DatabaseManager instance = null;
++
++	private DatabaseManager(Context context) {
++		if (!Database.exists("mobile", context.getFilesDir())) {
++			String assetFile = String.format("%s.cblite2.zip", DB_NAME);
++			Utils.installPrebuiltDatabase(context, assetFile);
++		}
++		DatabaseConfiguration configuration = new DatabaseConfiguration();
++		try {
++			database = new Database(DB_NAME, configuration);
++		} catch (CouchbaseLiteException e) {
++			e.printStackTrace();
++		}
++	}
++
++	public static DatabaseManager getSharedInstance(Context context) {
++		if (instance == null) {
++			CouchbaseLite.init(context);
++			instance = new DatabaseManager(context);
++		}
++		return instance;
++	}
++
++	public static Database getDatabase() {
++		if (instance == null) {
++			try {
++				throw new Exception("Must call getSharedInstance first");
++			} catch (Exception e) {
++				e.printStackTrace();
++			}
++		}
++		return database;
++	}
++
++}
+\ No newline at end of file
+diff --git a/android/app/src/main/java/com/universitylist/MainApplication.java b/android/app/src/main/java/com/universitylist/MainApplication.java
+index 8136abd..4062eb7 100644
+--- a/android/app/src/main/java/com/universitylist/MainApplication.java
++++ b/android/app/src/main/java/com/universitylist/MainApplication.java
+@@ -25,6 +25,7 @@ public class MainApplication extends Application implements ReactApplication {
+ 			List<ReactPackage> packages = new PackageList(this).getPackages();
+ 			// Packages that cannot be autolinked yet can be added manually here, for example:
+ 			// packages.add(new MyReactNativePackage());
++			packages.add(new UniversityFinderPackage());
+ 			return packages;
+ 		}
+
+diff --git a/android/app/src/main/java/com/universitylist/UniversityFinderNative.java b/android/app/src/main/java/com/universitylist/UniversityFinderNative.java
+new file mode 100644
+index 0000000..138f7ab
+--- /dev/null
++++ b/android/app/src/main/java/com/universitylist/UniversityFinderNative.java
+@@ -0,0 +1,79 @@
++package com.universitylist;
++
++import android.content.Context;
++
++import com.couchbase.lite.ArrayFunction;
++import com.couchbase.lite.Collation;
++import com.couchbase.lite.CouchbaseLiteException;
++import com.couchbase.lite.DataSource;
++import com.couchbase.lite.Database;
++import com.couchbase.lite.DatabaseConfiguration;
++import com.couchbase.lite.Dictionary;
++import com.couchbase.lite.Expression;
++import com.couchbase.lite.FullTextExpression;
++import com.couchbase.lite.FullTextIndex;
++import com.couchbase.lite.FullTextIndexItem;
++import com.couchbase.lite.IndexBuilder;
++import com.couchbase.lite.Join;
++import com.couchbase.lite.Meta;
++import com.couchbase.lite.MutableArray;
++import com.couchbase.lite.MutableDocument;
++import com.couchbase.lite.Query;
++import com.couchbase.lite.QueryBuilder;
++import com.couchbase.lite.Result;
++import com.couchbase.lite.ResultSet;
++import com.couchbase.lite.SelectResult;
++import com.facebook.react.bridge.Arguments;
++import com.facebook.react.bridge.Callback;
++import com.facebook.react.bridge.ReactApplicationContext;
++import com.facebook.react.bridge.ReactContextBaseJavaModule;
++import com.facebook.react.bridge.ReactMethod;
++import com.facebook.react.bridge.WritableArray;
++import com.facebook.react.bridge.WritableMap;
++
++import java.util.List;
++
++public class UniversityFinderNative extends ReactContextBaseJavaModule {
++	private Database database;
++
++	UniversityFinderNative(ReactApplicationContext reactContext) {
++		super(reactContext);
++		DatabaseManager.getSharedInstance(reactContext);
++		this.database = DatabaseManager.getDatabase();
++	}
++
++	@Override
++	public String getName() {
++		return "UniversityFinderNative";
++	}
++
++	@ReactMethod
++	private void search(String keyword, Callback errorCallback, Callback successCallback) {
++		Expression nameExp = Expression.property("name").like(Expression.string("%" + keyword + "%"));
++		Expression domainExp = Expression.property("domain").like(Expression.string("%" + keyword + "%"));
++
++		Query query = QueryBuilder
++			.select(
++				SelectResult.property("name"),
++				SelectResult.property("domain")
++			)
++			.from(DataSource.database(database))
++			.where(nameExp.or(domainExp));
++
++		ResultSet resultSet = null;
++		try {
++			resultSet = query.execute();
++		} catch (CouchbaseLiteException e) {
++			e.printStackTrace();
++			errorCallback.invoke();
++		}
++		WritableArray writableArray = Arguments.createArray();
++		assert resultSet != null;
++		for (Result result : resultSet) {
++			WritableMap writableMap = Arguments.makeNativeMap(result.toMap());
++			writableArray.pushMap(writableMap);
++		}
++		successCallback.invoke(writableArray);
++	}
++
++}
+\ No newline at end of file
+diff --git a/android/app/src/main/java/com/universitylist/UniversityFinderPackage.java b/android/app/src/main/java/com/universitylist/UniversityFinderPackage.java
+new file mode 100644
+index 0000000..7c44621
+--- /dev/null
++++ b/android/app/src/main/java/com/universitylist/UniversityFinderPackage.java
+@@ -0,0 +1,24 @@
++package com.universitylist;
++
++import com.facebook.react.ReactPackage;
++import com.facebook.react.bridge.NativeModule;
++import com.facebook.react.bridge.ReactApplicationContext;
++import com.facebook.react.uimanager.ViewManager;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++public class UniversityFinderPackage implements ReactPackage {
++	@Override
++	public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
++		return Collections.emptyList();
++	}
++
++	@Override
++	public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
++		List<NativeModule> modules = new ArrayList<>();
++		modules.add(new UniversityFinderNative(reactContext));
++		return modules;
++	}
++}
+\ No newline at end of file
+diff --git a/android/app/src/main/java/com/universitylist/Utils.java b/android/app/src/main/java/com/universitylist/Utils.java
+new file mode 100644
+index 0000000..a6fc085
+--- /dev/null
++++ b/android/app/src/main/java/com/universitylist/Utils.java
+@@ -0,0 +1,88 @@
++package com.universitylist;
++
++import android.content.Context;
++import android.content.res.AssetManager;
++
++import java.io.BufferedInputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipInputStream;
++
++public class Utils {
++
++	public static void installPrebuiltDatabase(Context context, String filename) {
++		AssetManager assetManager = context.getAssets();
++		try {
++			InputStream inputStream = assetManager.open(filename);
++			File outFile = new File(context.getFilesDir(), filename);
++			FileOutputStream out = new FileOutputStream(outFile);
++			copyFile(inputStream, out);
++			unpackZip(context.getFilesDir().getPath() + "/", filename);
++		} catch (IOException e) {
++			e.printStackTrace();
++		}
++	}
++
++	private static boolean unpackZip(String path, String zipname)
++	{
++		InputStream is;
++		ZipInputStream zis;
++		try
++		{
++			String filename;
++			is = new FileInputStream(path + zipname);
++			zis = new ZipInputStream(new BufferedInputStream(is));
++			ZipEntry ze;
++			byte[] buffer = new byte[1024];
++			int count;
++
++			while ((ze = zis.getNextEntry()) != null)
++			{
++				// zapis do souboru
++				filename = ze.getName();
++
++				// Need to create directories if not exists, or
++				// it will generate an Exception...
++				if (ze.isDirectory()) {
++					File fmd = new File(path + filename);
++					fmd.mkdirs();
++					continue;
++				}
++
++				FileOutputStream fout = new FileOutputStream(path + filename);
++
++				// cteni zipu a zapis
++				while ((count = zis.read(buffer)) != -1)
++				{
++					fout.write(buffer, 0, count);
++				}
++
++				fout.close();
++				zis.closeEntry();
++			}
++
++			zis.close();
++		}
++		catch(IOException e)
++		{
++			e.printStackTrace();
++			return false;
++		}
++
++		return true;
++	}
++
++	private static void copyFile(InputStream in, OutputStream out) throws IOException {
++		byte[] buffer = new byte[1024];
++		int read;
++		while((read = in.read(buffer)) != -1){
++			out.write(buffer, 0, read);
++		}
++	}
++
++}
+--
+2.30.1 (Apple Git-130)
+
